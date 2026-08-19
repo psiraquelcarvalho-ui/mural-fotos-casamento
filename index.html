@@ -9,6 +9,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,400;0,500;0,600;1,500;1,600&family=Jost:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
   :root{
     --ivory: #F7F1EC;
@@ -273,6 +275,17 @@
       <h2>Área da anfitriã</h2>
     </div>
 
+    <div class="host-card" id="host-lock">
+      <h3>Digite o PIN para entrar</h3>
+      <input type="text" id="host-pin" placeholder="PIN" inputmode="numeric" style="text-align:center; letter-spacing: 0.3em;">
+      <div class="btn-row" style="justify-content:center;">
+        <button class="btn-primary" id="host-unlock-btn">Entrar</button>
+      </div>
+      <div class="status-msg" id="host-lock-status"></div>
+    </div>
+
+    <div id="host-content" hidden>
+
     <div class="host-card">
       <h3>1. Configure o mural</h3>
       <label for="cfg-names">Nomes do casal</label>
@@ -303,6 +316,8 @@
       </div>
       <div class="status-msg" id="zip-status"></div>
     </div>
+
+    </div>
   </section>
 
 </div>
@@ -313,40 +328,82 @@
 
   var CFG_KEY = "event-config";
   var PHOTO_PREFIX = "photos:";
+  var HOST_PIN = "2208";
+  var hostUnlocked = false;
 
-  // ---------- storage helpers ----------
-  async function storageGet(key, shared){
-    try{
-      var r = await window.storage.get(key, shared);
-      return r ? r.value : null;
-    }catch(e){ return null; }
-  }
-  async function storageSet(key, value, shared){
-    try{
-      var r = await window.storage.set(key, value, shared);
-      return !!r;
-    }catch(e){ return false; }
-  }
-  async function storageList(prefix, shared){
-    try{
-      var r = await window.storage.list(prefix, shared);
-      return r && r.keys ? r.keys : [];
-    }catch(e){ return []; }
-  }
+  // ===========================================================
+  // CONFIGURAÇÃO DO FIREBASE — cole aqui os dados do SEU projeto
+  // (veja o passo a passo que o Claude te enviou no chat)
+  // ===========================================================
+  var firebaseConfig = {
+    apiKey: "AIzaSyDNvfX1Kfs_eBWqCAdWBVO1l242dPTd9-c",
+    authDomain: "mural-de-fotos-casamento.firebaseapp.com",
+    projectId: "mural-de-fotos-casamento",
+    storageBucket: "mural-de-fotos-casamento.firebasestorage.app",
+    messagingSenderId: "328815433910",
+    appId: "1:328815433910:web:217c428ce71ed823726e17"
+  };
+  var firebaseReady = false;
+  var db = null;
+  try{
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+    firebaseReady = true;
+  }catch(e){ firebaseReady = false; }
 
-  // ---------- config ----------
+  // ---------- storage helpers (Firestore) ----------
   var defaultConfig = { names: "Raquel & Renan", date: "22 de agosto de 2026" };
 
   async function loadConfig(){
-    var raw = await storageGet(CFG_KEY, true);
-    if(!raw) return defaultConfig;
-    try{ return Object.assign({}, defaultConfig, JSON.parse(raw)); }
-    catch(e){ return defaultConfig; }
+    if(!firebaseReady) return defaultConfig;
+    try{
+      var doc = await db.collection("config").doc("event").get();
+      if(doc.exists) return Object.assign({}, defaultConfig, doc.data());
+    }catch(e){}
+    return defaultConfig;
+  }
+
+  async function saveConfig(names, date){
+    if(!firebaseReady) return false;
+    try{
+      await db.collection("config").doc("event").set({ names: names, date: date });
+      return true;
+    }catch(e){ return false; }
+  }
+
+  async function addPhoto(guestName, dataUrl){
+    if(!firebaseReady) return false;
+    try{
+      await db.collection("photos").add({ guestName: guestName, dataUrl: dataUrl, ts: Date.now() });
+      return true;
+    }catch(e){ return false; }
+  }
+
+  async function countPhotos(){
+    if(!firebaseReady) return 0;
+    try{
+      var snap = await db.collection("photos").get();
+      return snap.size;
+    }catch(e){ return 0; }
+  }
+
+  async function listPhotos(){
+    if(!firebaseReady) return [];
+    try{
+      var snap = await db.collection("photos").orderBy("ts","asc").get();
+      var items = [];
+      snap.forEach(function(doc){
+        var d = doc.data();
+        d.id = doc.id;
+        items.push(d);
+      });
+      return items;
+    }catch(e){ return []; }
   }
 
   async function applyConfigToDOM(){
     var cfg = await loadConfig();
-    document.getElementById("g-names").textContent = cfg.names;
+    document.getElementById("g-names").textContent = firebaseReady ? cfg.names : "Configure o Firebase";
     document.getElementById("g-date").textContent = cfg.date || "";
     document.getElementById("gal-names").textContent = cfg.names;
     document.title = cfg.names + " • Mural de Fotos";
@@ -370,7 +427,7 @@
       a.classList.toggle("active", a.dataset.view === route);
     });
     if(route === "galeria") loadGallery();
-    if(route === "anfitriao") { applyConfigToDOM(); renderQR(); }
+    if(route === "anfitriao") renderHostLock();
   }
   window.addEventListener("hashchange", renderRoute);
 
@@ -382,7 +439,7 @@
       reader.onload = function(e){ img.src = e.target.result; };
       reader.onerror = reject;
       img.onload = function(){
-        var maxW = 1100;
+        var maxW = 900;
         var scale = Math.min(1, maxW / img.width);
         var w = Math.round(img.width * scale);
         var h = Math.round(img.height * scale);
@@ -390,7 +447,7 @@
         canvas.width = w; canvas.height = h;
         var ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL("image/jpeg", 0.72));
+        resolve(canvas.toDataURL("image/jpeg", 0.62));
       };
       img.onerror = reject;
       reader.readAsDataURL(file);
@@ -405,14 +462,18 @@
   }
 
   async function refreshCount(){
-    var keys = await storageList(PHOTO_PREFIX, true);
-    document.getElementById("photo-count").textContent = keys.length;
-    return keys.length;
+    var n = await countPhotos();
+    document.getElementById("photo-count").textContent = n;
+    return n;
   }
 
   async function uploadFiles(fileList){
     var files = Array.prototype.slice.call(fileList);
     if(!files.length) return;
+    if(!firebaseReady){
+      setStatus("O site ainda não foi configurado. Fale com quem criou o mural.", "err");
+      return;
+    }
     var guestName = document.getElementById("guest-name").value.trim() || "Convidado(a)";
     var pickBtn = document.getElementById("pick-btn");
     pickBtn.disabled = true;
@@ -424,9 +485,7 @@
       setStatus("Enviando " + (i+1) + " de " + files.length + "…");
       try{
         var dataUrl = await fileToCompressedDataURL(f);
-        var id = PHOTO_PREFIX + Date.now() + "-" + Math.random().toString(36).slice(2,8);
-        var payload = JSON.stringify({ guestName: guestName, dataUrl: dataUrl, ts: Date.now() });
-        var ok = await storageSet(id, payload, true);
+        var ok = await addPhoto(guestName, dataUrl);
         if(ok) okCount++;
       }catch(e){ /* skip file on error */ }
     }
@@ -479,24 +538,18 @@
     mural.innerHTML = "";
     statusBox.textContent = "Carregando fotos…";
 
-    var keys = await storageList(PHOTO_PREFIX, true);
-    if(!keys.length){
+    if(!firebaseReady){
+      statusBox.textContent = "";
+      mural.innerHTML = '<div class="gallery-empty">O site ainda não foi configurado. Fale com quem criou o mural.</div>';
+      return;
+    }
+
+    var items = await listPhotos();
+    if(!items.length){
       statusBox.textContent = "";
       mural.innerHTML = '<div class="gallery-empty">Nenhuma foto ainda. Assim que os convidados começarem a enviar, elas aparecem aqui.</div>';
       return;
     }
-
-    var items = [];
-    for(var i=0;i<keys.length;i++){
-      var raw = await storageGet(keys[i], true);
-      if(!raw) continue;
-      try{
-        var obj = JSON.parse(raw);
-        obj.id = keys[i];
-        items.push(obj);
-      }catch(e){}
-    }
-    items.sort(function(a,b){ return (a.ts||0) - (b.ts||0); });
 
     statusBox.textContent = "";
     items.forEach(function(item){
@@ -517,14 +570,37 @@
     });
   }
 
+  // ---------- host: PIN lock ----------
+  function renderHostLock(){
+    document.getElementById("host-lock").hidden = hostUnlocked;
+    document.getElementById("host-content").hidden = !hostUnlocked;
+    if(hostUnlocked){ applyConfigToDOM(); renderQR(); }
+  }
+  function tryUnlock(){
+    var val = document.getElementById("host-pin").value.trim();
+    var lockStatus = document.getElementById("host-lock-status");
+    if(val === HOST_PIN){
+      hostUnlocked = true;
+      lockStatus.textContent = "";
+      renderHostLock();
+    } else {
+      lockStatus.textContent = "PIN incorreto.";
+      lockStatus.className = "status-msg err";
+    }
+  }
+  document.getElementById("host-unlock-btn").addEventListener("click", tryUnlock);
+  document.getElementById("host-pin").addEventListener("keydown", function(e){
+    if(e.key === "Enter") tryUnlock();
+  });
+
   // ---------- host: save config ----------
   document.getElementById("save-cfg").addEventListener("click", async function(){
     var names = document.getElementById("cfg-names").value.trim() || defaultConfig.names;
     var date = document.getElementById("cfg-date").value.trim();
     var cfgStatus = document.getElementById("cfg-status");
     cfgStatus.textContent = "Salvando…";
-    var ok = await storageSet(CFG_KEY, JSON.stringify({ names: names, date: date }), true);
-    cfgStatus.textContent = ok ? "Salvo." : "Não foi possível salvar, tente novamente.";
+    var ok = await saveConfig(names, date);
+    cfgStatus.textContent = ok ? "Salvo." : "Não foi possível salvar. Confira se o Firebase foi configurado corretamente.";
     cfgStatus.className = "status-msg " + (ok ? "ok" : "err");
     applyConfigToDOM();
     renderQR();
@@ -568,18 +644,16 @@
   document.getElementById("dl-zip").addEventListener("click", async function(){
     var zipStatus = document.getElementById("zip-status");
     zipStatus.textContent = "Preparando arquivo…";
-    var keys = await storageList(PHOTO_PREFIX, true);
-    if(!keys.length){
+    var items = await listPhotos();
+    if(!items.length){
       zipStatus.textContent = "Ainda não há fotos para baixar.";
       return;
     }
     var zip = new JSZip();
     var count = 0;
-    for(var i=0;i<keys.length;i++){
-      var raw = await storageGet(keys[i], true);
-      if(!raw) continue;
+    for(var i=0;i<items.length;i++){
       try{
-        var obj = JSON.parse(raw);
+        var obj = items[i];
         var base64 = obj.dataUrl.split(",")[1];
         var name = (i+1) + "_" + (obj.guestName || "convidado").replace(/[^a-z0-9áéíóúãõâêôçà]/gi,"_") + ".jpg";
         zip.file(name, base64, { base64: true });
